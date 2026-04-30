@@ -36,6 +36,29 @@ function monthKeyFromDate(dateKey) {
   return String(dateKey || '').slice(0, 7);
 }
 
+async function sendExpoPushNotification(pushToken, title, body, data = {}) {
+  if (!pushToken) return;
+  try {
+    await fetch('https://exp.host/--/api/v2/push/send', {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Accept-encoding': 'gzip, deflate',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        to: pushToken,
+        sound: 'default',
+        title,
+        body,
+        data,
+      }),
+    });
+  } catch (error) {
+    console.error('Push notification send failed');
+  }
+}
+
 function resolveAssignedAdminId(inspectionDoc) {
   if (inspectionDoc.assignedBy) return inspectionDoc.assignedBy.toString();
   const history = Array.isArray(inspectionDoc.assignmentHistory) ? inspectionDoc.assignmentHistory : [];
@@ -282,7 +305,7 @@ router.patch(
       const assignedTo = String(req.body.assignedTo).trim();
       await ensureDaySeed(inspectionDate, req.user);
 
-      const assignee = await User.findById(assignedTo).select('_id name role department');
+      const assignee = await User.findById(assignedTo).select('_id name role department pushToken');
       if (!assignee || assignee.role !== 'employee') {
         return res.status(400).json({ message: 'Assignee must be an employee' });
       }
@@ -311,6 +334,18 @@ router.patch(
               assignedAt: new Date(),
             },
           },
+        }
+      );
+
+      const selectedCategory = ROOM_CATEGORIES.find((item) => item.key === categoryKey);
+      await sendExpoPushNotification(
+        assignee.pushToken,
+        'Room Inspection Assigned',
+        `${selectedCategory?.name || 'Category'} assigned for ${inspectionDate}`,
+        {
+          type: 'room_inspection_assigned',
+          inspectionDate,
+          categoryKey,
         }
       );
 
