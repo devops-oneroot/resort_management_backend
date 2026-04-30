@@ -22,6 +22,10 @@ const ticketSchema = new mongoose.Schema(
       default: null,
       trim: true,
     },
+    completedAt: {
+      type: Date,
+      default: null,
+    },
     status: {
       type: String,
       enum: ['pending', 'in_progress', 'completed'],
@@ -40,6 +44,34 @@ const ticketSchema = new mongoose.Schema(
     assignedTo: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
+      default: null,
+    },
+    assignmentHistory: [
+      {
+        assignedBy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'User',
+          required: true,
+        },
+        assignedTo: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'User',
+          required: true,
+        },
+        department: {
+          type: String,
+          default: null,
+          trim: true,
+        },
+        assignedAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
+    roomInspection: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'RoomInspection',
       default: null,
     },
   },

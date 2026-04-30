@@ -11,6 +11,59 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 router.use(protect);
 
+function normalizeDepartment(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase();
+}
+
+async function getAssignableUsersForRequester(requester, selectedDepartment) {
+  const department = String(selectedDepartment || '').trim();
+  const normalizedTarget = normalizeDepartment(department);
+  if (!normalizedTarget) return [];
+
+  if (requester.role === 'admin') {
+    const ownDepartment = normalizeDepartment(requester.department);
+    if (!requester.isMainAdmin) {
+      if (!ownDepartment || ownDepartment !== normalizedTarget) {
+        return [];
+      }
+      return User.find({
+        department,
+        role: 'employee',
+      })
+        .select('_id name role department pushToken')
+        .sort({ name: 1 });
+    }
+
+    return User.find({
+      department,
+      role: { $in: ['admin', 'employee'] },
+    })
+      .select('_id name role department pushToken')
+      .sort({ role: 1, name: 1 });
+  }
+
+  if (!requester.department) return [];
+  const ownDepartment = normalizeDepartment(requester.department);
+
+  if (ownDepartment === normalizedTarget) {
+    return User.find({
+      department,
+      role: { $in: ['admin', 'employee'] },
+    })
+      .select('_id name role department pushToken')
+      .sort({ role: 1, name: 1 });
+  }
+
+  return User.find({
+    department,
+    role: 'admin',
+  })
+    .select('_id name role department pushToken')
+    .sort({ name: 1 });
+}
+
 async function sendExpoPushNotification(pushToken, title, body, data = {}) {
   if (!pushToken) return;
   try {
@@ -37,23 +90,59 @@ async function sendExpoPushNotification(pushToken, title, body, data = {}) {
 router.get('/', async (req, res) => {
   try {
     const filter = {};
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 100);
+    const skip = (page - 1) * limit;
+
     if (req.query.status) filter.status = req.query.status;
     if (req.query.priority) filter.priority = req.query.priority;
     if (req.user.role === 'employee') {
-      filter.assignedTo = req.user._id;
+      filter.$or = [{ assignedTo: req.user._id }, { createdBy: req.user._id }];
     } else if (req.user.role === 'admin' && !req.user.isMainAdmin && req.user.department) {
-      const deptUsers = await User.find({ role: 'employee', department: req.user.department }).select('_id');
+      const deptUsers = await User.find({ department: req.user.department }).select('_id');
       filter.assignedTo = { $in: deptUsers.map((item) => item._id) };
     }
 
-    const tickets = await Ticket.find(filter)
-      .populate('createdBy', 'name phone role department')
-      .populate('assignedTo', 'name phone role department')
-      .sort({ createdAt: -1 });
+    const [tickets, totalCount] = await Promise.all([
+      Ticket.find(filter)
+        .populate('createdBy', 'name phone role department')
+        .populate('assignedTo', 'name phone role department')
+        .populate('assignmentHistory.assignedBy', 'name role department')
+        .populate('assignmentHistory.assignedTo', 'name role department')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit),
+      Ticket.countDocuments(filter),
+    ]);
 
-    return res.json({ count: tickets.length, tickets });
+    const totalPages = Math.max(Math.ceil(totalCount / limit), 1);
+
+    return res.json({
+      count: tickets.length,
+      totalCount,
+      page,
+      limit,
+      totalPages,
+      hasNextPage: page < totalPages,
+      hasPrevPage: page > 1,
+      tickets,
+    });
   } catch (error) {
     return res.status(500).json({ message: 'Failed to fetch tickets' });
+  }
+});
+
+router.get('/assignable-users', async (req, res) => {
+  try {
+    const department = String(req.query.department || '').trim();
+    if (!department) {
+      return res.status(400).json({ message: 'department is required' });
+    }
+
+    const users = await getAssignableUsersForRequester(req.user, department);
+    return res.json({ count: users.length, users });
+  } catch (error) {
+    return res.status(500).json({ message: 'Failed to fetch assignable users' });
   }
 });
 
@@ -63,6 +152,7 @@ router.post(
   [
     body('title').notEmpty().withMessage('Title is required'),
     body('description').notEmpty().withMessage('Description is required'),
+    body('department').notEmpty().withMessage('Department is required'),
     body('assignedTo').notEmpty().withMessage('Assigned user is required'),
     body('status')
       .optional()
@@ -77,9 +167,6 @@ router.post(
     }
 
     try {
-      if (req.user.role !== 'admin') {
-        return res.status(403).json({ message: 'Only admin can create tickets' });
-      }
       if (!req.file) {
         return res.status(400).json({ message: 'Image is mandatory' });
       }
@@ -93,12 +180,16 @@ router.post(
         folder: 'tickets',
       });
 
+      const selectedDepartment = String(req.body.department || '').trim();
       const assignee = await User.findById(req.body.assignedTo).select('_id role department pushToken name');
-      if (!assignee || assignee.role !== 'employee') {
-        return res.status(400).json({ message: 'Assigned user must be an employee' });
+      if (!assignee) {
+        return res.status(400).json({ message: 'Assigned user not found' });
       }
-      if (!req.user.isMainAdmin && assignee.department !== req.user.department) {
-        return res.status(400).json({ message: 'Department admin can assign only within their department' });
+
+      const assignableUsers = await getAssignableUsersForRequester(req.user, selectedDepartment);
+      const isAllowed = assignableUsers.some((user) => user._id.toString() === assignee._id.toString());
+      if (!isAllowed) {
+        return res.status(400).json({ message: 'Selected assignee is not allowed for this department' });
       }
 
       const ticket = await Ticket.create({
@@ -109,6 +200,14 @@ router.post(
         imageUrl: uploadResult.secure_url,
         assignedTo: req.body.assignedTo,
         createdBy: req.user._id,
+        assignmentHistory: [
+          {
+            assignedBy: req.user._id,
+            assignedTo: req.body.assignedTo,
+            department: selectedDepartment,
+            assignedAt: new Date(),
+          },
+        ],
       });
 
       await sendExpoPushNotification(
@@ -185,6 +284,7 @@ router.patch('/:id/complete', upload.single('image'), async (req, res) => {
     });
     ticket.status = 'completed';
     ticket.completionImageUrl = uploadResult.secure_url;
+    ticket.completedAt = new Date();
     const updatedTicket = await ticket.save();
     return res.json(updatedTicket);
   } catch (error) {
@@ -235,25 +335,30 @@ router.patch('/:id/reassign', async (req, res) => {
       return res.status(400).json({ message: 'Cannot reassign completed ticket' });
     }
 
-    if (req.user.role !== 'employee') {
-      return res.status(403).json({ message: 'Only assigned employee can reassign this ticket' });
-    }
-
     const isCurrentAssignee =
       ticket.assignedTo && ticket.assignedTo.toString() === req.user._id.toString();
-    if (!isCurrentAssignee) {
-      return res.status(403).json({ message: 'Only current assigned employee can reassign this ticket' });
+    if (req.user.role !== 'admin' && !isCurrentAssignee) {
+      return res.status(403).json({ message: 'Only assigned employee or admin can reassign this ticket' });
     }
 
     const targetUser = await User.findById(assignedTo).select('_id role department pushToken name');
-    if (!targetUser || targetUser.role !== 'employee') {
-      return res.status(400).json({ message: 'Target user must be an employee' });
+    if (!targetUser) {
+      return res.status(400).json({ message: 'Target user not found' });
     }
-    if (!req.user.department || targetUser.department !== req.user.department) {
-      return res.status(400).json({ message: 'Can only reassign to same department employee' });
+    const selectedDepartment = String(req.body.department || targetUser.department || '').trim();
+    const assignableUsers = await getAssignableUsersForRequester(req.user, selectedDepartment);
+    const isAllowed = assignableUsers.some((user) => user._id.toString() === targetUser._id.toString());
+    if (!isAllowed) {
+      return res.status(400).json({ message: 'Selected reassignment target is not allowed' });
     }
 
     ticket.assignedTo = targetUser._id;
+    ticket.assignmentHistory.push({
+      assignedBy: req.user._id,
+      assignedTo: targetUser._id,
+      department: selectedDepartment,
+      assignedAt: new Date(),
+    });
     const updatedTicket = await ticket.save();
     await sendExpoPushNotification(
       targetUser.pushToken,

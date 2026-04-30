@@ -15,6 +15,8 @@ app.get('/', (req, res) => {
 
 app.use('/api/auth', require('./routes/authRoutes'));
 app.use('/api/tickets', require('./routes/ticketRoutes'));
+app.use('/api/room-inspections', require('./routes/roomInspectionRoutes'));
+app.use('/api/attendance', require('./routes/attendanceRoutes'));
 
 app.use((req, res) => {
   res.status(404).json({ message: 'Route not found' });

@@ -203,6 +203,33 @@ router.get('/employees', protect, async (req, res) => {
   }
 });
 
+router.get('/users', protect, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Only admin can view users' });
+    }
+
+    const filter = {};
+    if (req.query.role) {
+      filter.role = String(req.query.role).trim();
+    }
+    if (req.query.department) {
+      filter.department = String(req.query.department).trim();
+    }
+    if (!req.user.isMainAdmin) {
+      filter.department = req.user.department;
+    }
+
+    const users = await User.find(filter)
+      .select('_id name phone role department isMainAdmin profileImageUrl createdAt updatedAt')
+      .sort({ createdAt: -1 });
+
+    return res.json({ count: users.length, users });
+  } catch (error) {
+    return res.status(500).json({ message: 'Failed to fetch users' });
+  }
+});
+
 router.get('/department-employees', protect, async (req, res) => {
   try {
     if (req.user.role !== 'employee') {
