@@ -65,9 +65,16 @@ async function getAssignableUsersForRequester(requester, selectedDepartment) {
 }
 
 async function sendExpoPushNotification(pushToken, title, body, data = {}) {
-  if (!pushToken) return;
+  if (!pushToken) {
+    return { ok: false, reason: 'missing_push_token' };
+  }
+  const normalizedToken = String(pushToken).trim();
+  if (!/^ExponentPushToken\[[^\]]+\]$/.test(normalizedToken) && !/^ExpoPushToken\[[^\]]+\]$/.test(normalizedToken)) {
+    console.error('Invalid Expo push token format:', normalizedToken);
+    return { ok: false, reason: 'invalid_push_token_format' };
+  }
   try {
-    await fetch('https://exp.host/--/api/v2/push/send', {
+    const response = await fetch('https://exp.host/--/api/v2/push/send', {
       method: 'POST',
       headers: {
         Accept: 'application/json',
@@ -75,15 +82,28 @@ async function sendExpoPushNotification(pushToken, title, body, data = {}) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        to: pushToken,
+        to: normalizedToken,
         sound: 'default',
         title,
         body,
         data,
       }),
     });
+    const payload = await response.json().catch(() => null);
+    const ticket = payload?.data;
+    const items = Array.isArray(ticket) ? ticket : [ticket];
+    const hasError = !response.ok || items.some((item) => item?.status === 'error');
+    if (hasError) {
+      console.error('Expo push send failed:', {
+        responseStatus: response.status,
+        responseBody: payload,
+      });
+      return { ok: false, reason: 'expo_rejected', details: payload };
+    }
+    return { ok: true };
   } catch (error) {
-    console.error('Push notification send failed');
+    console.error('Push notification send failed', error);
+    return { ok: false, reason: 'network_error', details: String(error) };
   }
 }
 
@@ -210,12 +230,18 @@ router.post(
         ],
       });
 
-      await sendExpoPushNotification(
+      const pushResult = await sendExpoPushNotification(
         assignee.pushToken,
         'New Ticket Assigned',
         `You have a new ticket: ${ticket.title}`,
         { ticketId: ticket._id.toString(), type: 'ticket_assigned' }
       );
+      if (!pushResult?.ok) {
+        console.error('Ticket assignment push not delivered', {
+          assigneeId: assignee._id?.toString(),
+          reason: pushResult?.reason,
+        });
+      }
 
       return res.status(201).json(ticket);
     } catch (error) {
@@ -360,12 +386,18 @@ router.patch('/:id/reassign', async (req, res) => {
       assignedAt: new Date(),
     });
     const updatedTicket = await ticket.save();
-    await sendExpoPushNotification(
+    const pushResult = await sendExpoPushNotification(
       targetUser.pushToken,
       'Ticket Reassigned',
       `A ticket has been reassigned to you: ${updatedTicket.title}`,
       { ticketId: updatedTicket._id.toString(), type: 'ticket_reassigned' }
     );
+    if (!pushResult?.ok) {
+      console.error('Ticket reassignment push not delivered', {
+        targetUserId: targetUser._id?.toString(),
+        reason: pushResult?.reason,
+      });
+    }
     return res.json(updatedTicket);
   } catch (error) {
     return res.status(500).json({ message: 'Failed to reassign ticket' });

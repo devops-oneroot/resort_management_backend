@@ -37,9 +37,16 @@ function monthKeyFromDate(dateKey) {
 }
 
 async function sendExpoPushNotification(pushToken, title, body, data = {}) {
-  if (!pushToken) return;
+  if (!pushToken) {
+    return { ok: false, reason: 'missing_push_token' };
+  }
+  const normalizedToken = String(pushToken).trim();
+  if (!/^ExponentPushToken\[[^\]]+\]$/.test(normalizedToken) && !/^ExpoPushToken\[[^\]]+\]$/.test(normalizedToken)) {
+    console.error('Invalid Expo push token format:', normalizedToken);
+    return { ok: false, reason: 'invalid_push_token_format' };
+  }
   try {
-    await fetch('https://exp.host/--/api/v2/push/send', {
+    const response = await fetch('https://exp.host/--/api/v2/push/send', {
       method: 'POST',
       headers: {
         Accept: 'application/json',
@@ -47,15 +54,28 @@ async function sendExpoPushNotification(pushToken, title, body, data = {}) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        to: pushToken,
+        to: normalizedToken,
         sound: 'default',
         title,
         body,
         data,
       }),
     });
+    const payload = await response.json().catch(() => null);
+    const dataNode = payload?.data;
+    const tickets = Array.isArray(dataNode) ? dataNode : [dataNode];
+    const hasError = !response.ok || tickets.some((item) => item?.status === 'error');
+    if (hasError) {
+      console.error('Expo push send failed:', {
+        responseStatus: response.status,
+        responseBody: payload,
+      });
+      return { ok: false, reason: 'expo_rejected', details: payload };
+    }
+    return { ok: true };
   } catch (error) {
-    console.error('Push notification send failed');
+    console.error('Push notification send failed', error);
+    return { ok: false, reason: 'network_error', details: String(error) };
   }
 }
 
@@ -338,7 +358,7 @@ router.patch(
       );
 
       const selectedCategory = ROOM_CATEGORIES.find((item) => item.key === categoryKey);
-      await sendExpoPushNotification(
+      const pushResult = await sendExpoPushNotification(
         assignee.pushToken,
         'Room Inspection Assigned',
         `${selectedCategory?.name || 'Category'} assigned for ${inspectionDate}`,
@@ -348,8 +368,19 @@ router.patch(
           categoryKey,
         }
       );
+      if (!pushResult?.ok) {
+        console.error('Room inspection assignment push not delivered', {
+          assigneeId: assignee._id?.toString(),
+          reason: pushResult?.reason,
+        });
+      }
 
-      return res.json({ message: 'Category assigned successfully' });
+      return res.json({
+        message: 'Category assigned successfully',
+        push: pushResult?.ok
+          ? { ok: true }
+          : { ok: false, reason: pushResult?.reason || 'unknown_push_error' },
+      });
     } catch (error) {
       return res.status(500).json({ message: 'Failed to assign category' });
     }
