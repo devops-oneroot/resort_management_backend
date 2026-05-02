@@ -134,26 +134,34 @@ async function upsertInProgressTicketForInspection({ inspection, employeeUserId 
   });
 }
 
-async function ensureDaySeed(inspectionDate, user) {
-  const existing = await RoomInspection.countDocuments({ inspectionDate });
+/**
+ * Creates room inspection rows for one category and date only (when none exist yet).
+ * Used only from PATCH /assign-category so listing a category never inserts DB rows.
+ */
+async function ensureCategorySeed(inspectionDate, categoryKey, user) {
+  const key = String(categoryKey || '').trim();
+  if (!key) return;
+
+  const existing = await RoomInspection.countDocuments({ inspectionDate, categoryKey: key });
   if (existing > 0) return;
 
+  const category = ROOM_CATEGORIES.find((item) => item.key === key);
+  if (!category) return;
+
   const department = user.department || 'House Keeping';
-  const seedDocs = ROOM_CATEGORIES.flatMap((category) => {
-    const checklistTemplate = getChecklistForCategory(category.name).map((label) => ({ label, isChecked: false }));
-    return Array.from({ length: category.totalRooms }, (_, idx) => {
-      const roomNumber = idx + 1;
-      return {
-        inspectionDate,
-        categoryKey: category.key,
-        categoryName: category.name,
-        roomNumber,
-        roomLabel: buildRoomLabel(category.name, roomNumber),
-        department,
-        checklist: checklistTemplate,
-        createdBy: user._id,
-      };
-    });
+  const checklistTemplate = getChecklistForCategory(category.name).map((label) => ({ label, isChecked: false }));
+  const seedDocs = Array.from({ length: category.totalRooms }, (_, idx) => {
+    const roomNumber = idx + 1;
+    return {
+      inspectionDate,
+      categoryKey: category.key,
+      categoryName: category.name,
+      roomNumber,
+      roomLabel: buildRoomLabel(category.name, roomNumber),
+      department,
+      checklist: checklistTemplate,
+      createdBy: user._id,
+    };
   });
 
   await RoomInspection.insertMany(seedDocs, { ordered: false });
@@ -189,7 +197,6 @@ async function getAssignableUsersForCategory(requester) {
 router.get('/dashboard', async (req, res) => {
   try {
     const inspectionDate = toDateKey(req.query.date || req.query.filterDate);
-    await ensureDaySeed(inspectionDate, req.user);
 
     const filter = { inspectionDate };
     if (req.user.role === 'employee') {
@@ -276,7 +283,8 @@ router.get('/', async (req, res) => {
       return res.status(400).json({ message: 'category is required' });
     }
 
-    await ensureDaySeed(inspectionDate, req.user);
+    // Do not seed on read: clients (e.g. web dashboard with another category selected) would
+    // create rows for that category. Inspection rows are created only in PATCH /assign-category.
     const filter = { inspectionDate, categoryKey };
     if (req.user.role === 'employee') {
       filter.assignedTo = req.user._id;
@@ -323,7 +331,7 @@ router.patch(
       const inspectionDate = toDateKey(req.body.inspectionDate);
       const categoryKey = String(req.body.categoryKey).trim();
       const assignedTo = String(req.body.assignedTo).trim();
-      await ensureDaySeed(inspectionDate, req.user);
+      await ensureCategorySeed(inspectionDate, categoryKey, req.user);
 
       const assignee = await User.findById(assignedTo).select('_id name role department pushToken');
       if (!assignee || assignee.role !== 'employee') {
