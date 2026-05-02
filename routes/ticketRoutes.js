@@ -107,21 +107,85 @@ async function sendExpoPushNotification(pushToken, title, body, data = {}) {
   }
 }
 
+function buildTicketListFilter(req) {
+  const filter = {};
+  if (req.user.role === 'employee') {
+    const assignedOnly = req.query.assignedToMe === 'true' || req.query.assignedToMe === '1';
+    if (assignedOnly) {
+      filter.assignedTo = req.user._id;
+    } else {
+      filter.$or = [{ assignedTo: req.user._id }, { createdBy: req.user._id }];
+    }
+  } else if (req.user.role === 'admin' && !req.user.isMainAdmin && req.user.department) {
+    const deptUsers = User.find({ department: req.user.department }).select('_id');
+    return deptUsers.then((users) => {
+      filter.assignedTo = { $in: users.map((item) => item._id) };
+      return filter;
+    });
+  }
+  return Promise.resolve(filter);
+}
+
+router.get('/summary', async (req, res) => {
+  try {
+    const filter = await buildTicketListFilter(req);
+    const openQuery = { ...filter, status: { $in: ['pending', 'in_progress'] } };
+    const employeeUnionFilter = {
+      $or: [{ assignedTo: req.user._id }, { createdBy: req.user._id }],
+    };
+
+    const [
+      totalOpen,
+      pendingCount,
+      inProgressCount,
+      listScopeTotal,
+      employeeUnionTotal,
+      assignedToYouTotal,
+      assignedOpenDocs,
+    ] = await Promise.all([
+      Ticket.countDocuments(openQuery),
+      Ticket.countDocuments({ ...filter, status: 'pending' }),
+      Ticket.countDocuments({ ...filter, status: 'in_progress' }),
+      Ticket.countDocuments(filter),
+      req.user.role === 'employee' ? Ticket.countDocuments(employeeUnionFilter) : Promise.resolve(null),
+      Ticket.countDocuments({ assignedTo: req.user._id }),
+      req.user.role === 'employee'
+        ? Ticket.find({
+            assignedTo: req.user._id,
+            status: { $in: ['pending', 'in_progress'] },
+          })
+            .select('_id')
+            .lean()
+        : Promise.resolve([]),
+    ]);
+
+    return res.json({
+      totalOpen,
+      pendingCount,
+      inProgressCount,
+      listScopeTotal,
+      employeeUnionTotal,
+      assignedToYouTotal,
+      assignedOpenTicketIds: assignedOpenDocs.map((t) => String(t._id)),
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Failed to load ticket summary' });
+  }
+});
+
 router.get('/', async (req, res) => {
   try {
-    const filter = {};
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 100);
     const skip = (page - 1) * limit;
 
+    const filter = await buildTicketListFilter(req);
+
     if (req.query.status) filter.status = req.query.status;
-    if (req.query.priority) filter.priority = req.query.priority;
-    if (req.user.role === 'employee') {
-      filter.$or = [{ assignedTo: req.user._id }, { createdBy: req.user._id }];
-    } else if (req.user.role === 'admin' && !req.user.isMainAdmin && req.user.department) {
-      const deptUsers = await User.find({ department: req.user.department }).select('_id');
-      filter.assignedTo = { $in: deptUsers.map((item) => item._id) };
+    else if (req.query.openOnly === 'true' || req.query.openOnly === '1') {
+      filter.status = { $in: ['pending', 'in_progress'] };
     }
+    if (req.query.priority) filter.priority = req.query.priority;
 
     const [tickets, totalCount] = await Promise.all([
       Ticket.find(filter)
