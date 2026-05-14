@@ -235,7 +235,7 @@ router.post(
   upload.single('image'),
   [
     body('title').notEmpty().withMessage('Title is required'),
-    body('description').notEmpty().withMessage('Description is required'),
+    body('description').optional().trim(),
     body('department').notEmpty().withMessage('Department is required'),
     body('assignedTo').notEmpty().withMessage('Assigned user is required'),
     body('status')
@@ -278,7 +278,7 @@ router.post(
 
       const ticket = await Ticket.create({
         title: req.body.title,
-        description: req.body.description,
+        description: String(req.body.description ?? '').trim(),
         status: 'pending',
         priority: req.body.priority,
         imageUrl: uploadResult.secure_url,

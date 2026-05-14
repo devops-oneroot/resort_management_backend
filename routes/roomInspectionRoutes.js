@@ -10,7 +10,7 @@ const { protect } = require('../middleware/authMiddleware');
 const {
   ROOM_CATEGORIES,
   getChecklistForCategory,
-  buildRoomLabel,
+  getSeedSlotsForCategory,
 } = require('../config/roomInspectionConfig');
 
 const router = express.Router();
@@ -88,6 +88,7 @@ function resolveAssignedAdminId(inspectionDoc) {
 }
 
 async function upsertInProgressTicketForInspection({ inspection, employeeUserId }) {
+  if (inspection.status === 'occupied') return;
   const assignedAdminId = resolveAssignedAdminId(inspection);
   if (!assignedAdminId || assignedAdminId === employeeUserId.toString()) return;
   if (!inspection.progressImageUrl) return;
@@ -150,19 +151,17 @@ async function ensureCategorySeed(inspectionDate, categoryKey, user) {
 
   const department = user.department || 'House Keeping';
   const checklistTemplate = getChecklistForCategory(category.name).map((label) => ({ label, isChecked: false }));
-  const seedDocs = Array.from({ length: category.totalRooms }, (_, idx) => {
-    const roomNumber = idx + 1;
-    return {
-      inspectionDate,
-      categoryKey: category.key,
-      categoryName: category.name,
-      roomNumber,
-      roomLabel: buildRoomLabel(category.name, roomNumber),
-      department,
-      checklist: checklistTemplate,
-      createdBy: user._id,
-    };
-  });
+  const slots = getSeedSlotsForCategory(category);
+  const seedDocs = slots.map((slot) => ({
+    inspectionDate,
+    categoryKey: category.key,
+    categoryName: category.name,
+    roomNumber: slot.roomNumber,
+    roomLabel: slot.roomLabel,
+    department,
+    checklist: checklistTemplate,
+    createdBy: user._id,
+  }));
 
   await RoomInspection.insertMany(seedDocs, { ordered: false });
 }
@@ -207,23 +206,65 @@ router.get('/dashboard', async (req, res) => {
       .populate('assignedTo', 'name role department')
       .sort({ categoryName: 1, roomNumber: 1 });
 
-    const categories = ROOM_CATEGORIES.map((category) => {
+    const knownKeys = new Set(ROOM_CATEGORIES.map((c) => c.key));
+
+    const categoriesFromConfig = ROOM_CATEGORIES.map((category) => {
       const records = inspections.filter((item) => item.categoryKey === category.key);
-      const completed = records.filter((item) => item.status === 'completed').length;
+      const completed = records.filter(
+        (item) => item.status === 'completed' || item.status === 'occupied'
+      ).length;
+      const inProgressRooms = records.filter((item) => item.status === 'in_progress').length;
+      const pendingRooms = records.filter((item) => item.status === 'pending').length;
+      const occupiedRooms = records.filter((item) => item.status === 'occupied').length;
       const assignedTo = records.find((item) => item.assignedTo)?.assignedTo || null;
       return {
         categoryKey: category.key,
         categoryName: category.name,
         totalRooms: category.totalRooms,
         completedRooms: completed,
+        inProgressRooms,
+        pendingRooms,
+        occupiedRooms,
         progress: `${completed}/${category.totalRooms}`,
         assignedTo,
       };
     });
 
+    const orphanKeys = [
+      ...new Set(
+        inspections.map((item) => item.categoryKey).filter((key) => key && !knownKeys.has(key))
+      ),
+    ];
+    const orphanCategories = orphanKeys.map((key) => {
+      const records = inspections.filter((item) => item.categoryKey === key);
+      const name = records[0]?.categoryName || key;
+      const totalRooms = records.length;
+      const completed = records.filter(
+        (item) => item.status === 'completed' || item.status === 'occupied'
+      ).length;
+      const inProgressRooms = records.filter((item) => item.status === 'in_progress').length;
+      const pendingRooms = records.filter((item) => item.status === 'pending').length;
+      const occupiedRooms = records.filter((item) => item.status === 'occupied').length;
+      const assignedTo = records.find((item) => item.assignedTo)?.assignedTo || null;
+      return {
+        categoryKey: key,
+        categoryName: name,
+        totalRooms,
+        completedRooms: completed,
+        inProgressRooms,
+        pendingRooms,
+        occupiedRooms,
+        progress: `${completed}/${totalRooms}`,
+        assignedTo,
+      };
+    });
+
+    const categories = [...categoriesFromConfig, ...orphanCategories];
+
     const summary = {
       total: inspections.length,
       completed: inspections.filter((item) => item.status === 'completed').length,
+      occupied: inspections.filter((item) => item.status === 'occupied').length,
       inProgress: inspections.filter((item) => item.status === 'in_progress').length,
       pending: inspections.filter((item) => item.status === 'pending').length,
     };
@@ -252,7 +293,7 @@ router.get('/calendar', async (req, res) => {
     docs.forEach((doc) => {
       const prev = dayMap.get(doc.inspectionDate) || { total: 0, completed: 0 };
       prev.total += 1;
-      if (doc.status === 'completed') prev.completed += 1;
+      if (doc.status === 'completed' || doc.status === 'occupied') prev.completed += 1;
       dayMap.set(doc.inspectionDate, prev);
     });
 
@@ -331,6 +372,14 @@ router.patch(
       const inspectionDate = toDateKey(req.body.inspectionDate);
       const categoryKey = String(req.body.categoryKey).trim();
       const assignedTo = String(req.body.assignedTo).trim();
+
+      const categoryDef = ROOM_CATEGORIES.find((item) => item.key === categoryKey);
+      if (!categoryDef) {
+        return res.status(400).json({
+          message: `Unknown categoryKey "${categoryKey}". Use one of: ${ROOM_CATEGORIES.map((c) => c.key).join(', ')}`,
+        });
+      }
+
       await ensureCategorySeed(inspectionDate, categoryKey, req.user);
 
       const assignee = await User.findById(assignedTo).select('_id name role department pushToken');
@@ -365,11 +414,10 @@ router.patch(
         }
       );
 
-      const selectedCategory = ROOM_CATEGORIES.find((item) => item.key === categoryKey);
       const pushResult = await sendExpoPushNotification(
         assignee.pushToken,
         'Room Inspection Assigned',
-        `${selectedCategory?.name || 'Category'} assigned for ${inspectionDate}`,
+        `${categoryDef.name} assigned for ${inspectionDate}`,
         {
           type: 'room_inspection_assigned',
           inspectionDate,
@@ -423,6 +471,74 @@ router.get('/:id', async (req, res) => {
   }
 });
 
+router.patch('/:id/mark-occupied', async (req, res) => {
+  try {
+    const inspection = await RoomInspection.findById(req.params.id);
+    if (!inspection) {
+      return res.status(404).json({ message: 'Inspection not found' });
+    }
+
+    const isMainAdmin = req.user.role === 'admin' && req.user.isMainAdmin;
+    const isAssignee = inspection.assignedTo && inspection.assignedTo.toString() === req.user._id.toString();
+    const isDeptAdmin =
+      req.user.role === 'admin' &&
+      !req.user.isMainAdmin &&
+      normalizeDepartment(inspection.department) === normalizeDepartment(req.user.department);
+    if (!isMainAdmin && !isAssignee && !isDeptAdmin) {
+      return res.status(403).json({ message: 'Only assigned staff or admin can update this room' });
+    }
+
+    if (inspection.status === 'completed') {
+      return res.status(400).json({ message: 'Room is already completed' });
+    }
+
+    if (inspection.status === 'occupied') {
+      return res.json(inspection);
+    }
+
+    inspection.status = 'occupied';
+    const updated = await inspection.save();
+
+    await Ticket.deleteMany({
+      roomInspection: inspection._id,
+      status: { $in: ['pending', 'in_progress'] },
+    });
+
+    return res.json(updated);
+  } catch (error) {
+    return res.status(500).json({ message: 'Failed to mark room occupied' });
+  }
+});
+
+router.patch('/:id/clear-occupied', async (req, res) => {
+  try {
+    const inspection = await RoomInspection.findById(req.params.id);
+    if (!inspection) {
+      return res.status(404).json({ message: 'Inspection not found' });
+    }
+
+    const isMainAdmin = req.user.role === 'admin' && req.user.isMainAdmin;
+    const isAssignee = inspection.assignedTo && inspection.assignedTo.toString() === req.user._id.toString();
+    const isDeptAdmin =
+      req.user.role === 'admin' &&
+      !req.user.isMainAdmin &&
+      normalizeDepartment(inspection.department) === normalizeDepartment(req.user.department);
+    if (!isMainAdmin && !isAssignee && !isDeptAdmin) {
+      return res.status(403).json({ message: 'Only assigned staff or admin can update this room' });
+    }
+
+    if (inspection.status !== 'occupied') {
+      return res.status(400).json({ message: 'Room is not marked occupied' });
+    }
+
+    inspection.status = 'pending';
+    const updated = await inspection.save();
+    return res.json(updated);
+  } catch (error) {
+    return res.status(500).json({ message: 'Failed to clear occupied status' });
+  }
+});
+
 router.patch('/:id/checklist', upload.single('image'), async (req, res) => {
   try {
     const checklistRaw = req.body?.checklist;
@@ -430,6 +546,12 @@ router.patch('/:id/checklist', upload.single('image'), async (req, res) => {
     const inspection = await RoomInspection.findById(req.params.id);
     if (!inspection) {
       return res.status(404).json({ message: 'Inspection not found' });
+    }
+
+    if (inspection.status === 'occupied') {
+      return res.status(400).json({
+        message: 'Room is marked occupied (guest present). Clear occupied status before updating the checklist.',
+      });
     }
 
     const isMainAdmin = req.user.role === 'admin' && req.user.isMainAdmin;
@@ -483,6 +605,10 @@ router.patch('/:id/complete', async (req, res) => {
     const inspection = await RoomInspection.findById(req.params.id);
     if (!inspection) {
       return res.status(404).json({ message: 'Inspection not found' });
+    }
+
+    if (inspection.status === 'occupied') {
+      return res.status(400).json({ message: 'Clear occupied status before completing inspection.' });
     }
 
     const isMainAdmin = req.user.role === 'admin' && req.user.isMainAdmin;

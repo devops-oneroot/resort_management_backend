@@ -27,7 +27,7 @@ const roomInspectionSchema = new mongoose.Schema(
     department: { type: String, required: true, trim: true },
     status: {
       type: String,
-      enum: ['pending', 'in_progress', 'completed'],
+      enum: ['pending', 'in_progress', 'completed', 'occupied'],
       default: 'pending',
     },
     assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
