@@ -2,6 +2,7 @@ const express = require('express');
 const { body, validationResult } = require('express-validator');
 
 const Attendance = require('../models/Attendance');
+const LocationPing = require('../models/LocationPing');
 const { protect } = require('../middleware/authMiddleware');
 
 const router = express.Router();
@@ -13,6 +14,14 @@ function todayKey() {
   const month = String(now.getMonth() + 1).padStart(2, '0');
   const day = String(now.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+function isOnShift(record) {
+  if (!record?.checkIn) return false;
+  if (!record.checkOut) return true;
+  const inAt = new Date(record.checkIn.capturedAt).getTime();
+  const outAt = new Date(record.checkOut.capturedAt).getTime();
+  return outAt <= inAt;
 }
 
 function toDateTimeLabel(value) {
@@ -30,10 +39,12 @@ router.get('/today', async (req, res) => {
   try {
     const dateKey = todayKey();
     const record = await Attendance.findOne({ user: req.user._id, dateKey });
+    const onShift = isOnShift(record);
     return res.json({
       dateKey,
       checkedIn: Boolean(record?.checkIn),
-      checkedOut: Boolean(record?.checkOut),
+      checkedOut: Boolean(record?.checkOut) && !onShift,
+      onShift,
       checkIn: record?.checkIn || null,
       checkOut: record?.checkOut || null,
     });
@@ -63,9 +74,18 @@ router.post(
 
       const record = await Attendance.findOneAndUpdate(
         { user: req.user._id, dateKey },
-        { $set: { checkIn: point } },
+        { $set: { checkIn: point }, $unset: { checkOut: 1 } },
         { new: true, upsert: true, setDefaultsOnInsert: true }
       );
+
+      await LocationPing.create({
+        user: req.user._id,
+        dateKey,
+        latitude: point.latitude,
+        longitude: point.longitude,
+        accuracy: null,
+        capturedAt: point.capturedAt,
+      });
 
       return res.status(201).json({
         message: 'Checked in successfully',

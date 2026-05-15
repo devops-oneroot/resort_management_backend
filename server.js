@@ -18,6 +18,7 @@ app.use('/api/tickets', require('./routes/ticketRoutes'));
 app.use('/api/daily-tasks', require('./routes/dailyTaskRoutes'));
 app.use('/api/room-inspections', require('./routes/roomInspectionRoutes'));
 app.use('/api/attendance', require('./routes/attendanceRoutes'));
+app.use('/api/tracking', require('./routes/trackingRoutes'));
 
 app.use((req, res) => {
   res.status(404).json({ message: 'Route not found' });
