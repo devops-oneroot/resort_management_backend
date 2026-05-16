@@ -6,6 +6,7 @@ const cloudinary = require('../config/cloudinary');
 const { protect } = require('../middleware/authMiddleware');
 const dailyTaskCompleteOnePost = require('../handlers/dailyTaskCompleteOne');
 const { completeDailyTaskById } = dailyTaskCompleteOnePost;
+const { toDateKeyInput } = require('../utils/dateKey');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -14,15 +15,6 @@ router.use(protect);
 
 /** Same as app-level POST; lives on router so /api/daily-tasks/complete-one always exists when this file is mounted. */
 router.post('/complete-one', dailyTaskCompleteOnePost);
-
-function toDateKey(value) {
-  const date = value ? new Date(value) : new Date();
-  if (Number.isNaN(date.getTime())) return null;
-  const year = date.getFullYear();
-  const month = `${date.getMonth() + 1}`.padStart(2, '0');
-  const day = `${date.getDate()}`.padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
 
 function normalizeDepartment(value) {
   return String(value || '')
@@ -61,7 +53,7 @@ router.post(
       });
 
       const now = new Date();
-      const dateKey = toDateKey(now);
+      const dateKey = toDateKeyInput(now);
       const task = await DailyTask.create({
         taskTitle: String(req.body.taskTitle || '').trim(),
         employee: req.user._id,
@@ -87,7 +79,7 @@ router.patch('/:id/end', (req, res) => completeDailyTaskById(req, res, req.param
 
 router.get('/my-today', async (req, res) => {
   try {
-    const dateKey = toDateKey(req.query.date);
+    const dateKey = toDateKeyInput(req.query.date);
     if (!dateKey) {
       return res.status(400).json({ message: 'Invalid date' });
     }
@@ -111,7 +103,7 @@ router.get('/admin', async (req, res) => {
       return res.status(403).json({ message: 'Only admin can view all daily tasks' });
     }
 
-    const dateKey = toDateKey(req.query.date);
+    const dateKey = toDateKeyInput(req.query.date);
     if (!dateKey) {
       return res.status(400).json({ message: 'Invalid date' });
     }

@@ -4,28 +4,10 @@ const { body, validationResult } = require('express-validator');
 const Attendance = require('../models/Attendance');
 const LocationPing = require('../models/LocationPing');
 const { protect } = require('../middleware/authMiddleware');
+const { todayKey, toDateKeyInput, toDateTimeLabel } = require('../utils/dateKey');
 
 const router = express.Router();
 router.use(protect);
-
-function todayKey() {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
-
-function toDateTimeLabel(value) {
-  return new Date(value).toLocaleString('en-GB', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: true,
-  });
-}
 
 function isOnShift(attendance) {
   if (!attendance?.checkIn) return false;
@@ -104,7 +86,7 @@ router.get('/live', async (req, res) => {
       return res.status(403).json({ message: 'Only admin can view live tracking' });
     }
 
-    const dateKey = req.query.date ? String(req.query.date).slice(0, 10) : todayKey();
+    const dateKey = toDateKeyInput(req.query.date);
 
     const attendanceDocs = await Attendance.find({ dateKey, checkIn: { $ne: null } })
       .populate('user', 'name phone role department')
@@ -233,7 +215,7 @@ router.get('/trail', async (req, res) => {
       return res.status(403).json({ message: 'Not allowed to view this employee trail' });
     }
 
-    const dateKey = req.query.date ? String(req.query.date).slice(0, 10) : todayKey();
+    const dateKey = toDateKeyInput(req.query.date);
     const pings = await LocationPing.find({ user: userId, dateKey }).sort({ capturedAt: 1 }).lean();
 
     return res.json({

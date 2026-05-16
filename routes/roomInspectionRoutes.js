@@ -12,15 +12,11 @@ const {
   getChecklistForCategory,
   getSeedSlotsForCategory,
 } = require('../config/roomInspectionConfig');
+const { toDateKeyInput } = require('../utils/dateKey');
 
 const router = express.Router();
 router.use(protect);
 const upload = multer({ storage: multer.memoryStorage() });
-
-function toDateKey(value) {
-  if (!value) return new Date().toISOString().slice(0, 10);
-  return String(value).slice(0, 10);
-}
 
 function normalizeDepartment(value) {
   return String(value || '')
@@ -195,7 +191,7 @@ async function getAssignableUsersForCategory(requester) {
 
 router.get('/dashboard', async (req, res) => {
   try {
-    const inspectionDate = toDateKey(req.query.date || req.query.filterDate);
+    const inspectionDate = toDateKeyInput(req.query.date || req.query.filterDate);
 
     const filter = { inspectionDate };
     if (req.user.role === 'employee') {
@@ -277,9 +273,9 @@ router.get('/dashboard', async (req, res) => {
 
 router.get('/calendar', async (req, res) => {
   try {
-    const month = monthKeyFromDate(req.query.month || toDateKey());
+    const month = monthKeyFromDate(req.query.month || toDateKeyInput());
     const colorFilter = String(req.query.color || '').trim().toLowerCase();
-    const dateFilter = req.query.date ? toDateKey(req.query.date) : '';
+    const dateFilter = req.query.date ? toDateKeyInput(req.query.date) : '';
     const filter = { inspectionDate: { $regex: `^${month}` } };
     if (dateFilter) {
       filter.inspectionDate = dateFilter;
@@ -318,7 +314,7 @@ router.get('/calendar', async (req, res) => {
 
 router.get('/', async (req, res) => {
   try {
-    const inspectionDate = toDateKey(req.query.date);
+    const inspectionDate = toDateKeyInput(req.query.date);
     const categoryKey = String(req.query.category || '').trim();
     if (!categoryKey) {
       return res.status(400).json({ message: 'category is required' });
@@ -369,7 +365,7 @@ router.patch(
         return res.status(403).json({ message: 'Only admin can assign category staff' });
       }
 
-      const inspectionDate = toDateKey(req.body.inspectionDate);
+      const inspectionDate = toDateKeyInput(req.body.inspectionDate);
       const categoryKey = String(req.body.categoryKey).trim();
       const assignedTo = String(req.body.assignedTo).trim();
 

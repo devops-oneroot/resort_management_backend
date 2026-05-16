@@ -4,17 +4,10 @@ const { body, validationResult } = require('express-validator');
 const Attendance = require('../models/Attendance');
 const LocationPing = require('../models/LocationPing');
 const { protect } = require('../middleware/authMiddleware');
+const { todayKey, toDateKeyInput, toDateTimeLabel } = require('../utils/dateKey');
 
 const router = express.Router();
 router.use(protect);
-
-function todayKey() {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
 
 function isOnShift(record) {
   if (!record?.checkIn) return false;
@@ -24,15 +17,10 @@ function isOnShift(record) {
   return outAt <= inAt;
 }
 
-function toDateTimeLabel(value) {
-  return new Date(value).toLocaleString('en-GB', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: true,
-  });
+function normalizeDepartment(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase();
 }
 
 router.get('/today', async (req, res) => {
@@ -42,11 +30,16 @@ router.get('/today', async (req, res) => {
     const onShift = isOnShift(record);
     return res.json({
       dateKey,
+      serverTodayKey: dateKey,
       checkedIn: Boolean(record?.checkIn),
       checkedOut: Boolean(record?.checkOut) && !onShift,
       onShift,
-      checkIn: record?.checkIn || null,
-      checkOut: record?.checkOut || null,
+      checkIn: record?.checkIn
+        ? { ...record.checkIn.toObject(), capturedAtLabel: toDateTimeLabel(record.checkIn.capturedAt) }
+        : null,
+      checkOut: record?.checkOut
+        ? { ...record.checkOut.toObject(), capturedAtLabel: toDateTimeLabel(record.checkOut.capturedAt) }
+        : null,
     });
   } catch (error) {
     return res.status(500).json({ message: 'Failed to fetch attendance status' });
@@ -138,20 +131,23 @@ router.get('/', async (req, res) => {
       return res.status(403).json({ message: 'Only admin can view attendance records' });
     }
 
-    const filter = {};
-    if (req.query.date) {
-      filter.dateKey = String(req.query.date).slice(0, 10);
-    }
+    const requestedDateKey = toDateKeyInput(req.query.date);
+    const filter = { dateKey: requestedDateKey };
 
     const docs = await Attendance.find(filter)
       .populate('user', 'name phone role department')
       .sort({ dateKey: -1, createdAt: -1 });
 
+    const adminDepartment = normalizeDepartment(req.user.department);
+
     const rows = docs
       .filter((item) => {
+        if (!item.user) return false;
         if (req.user.isMainAdmin) return true;
-        return item.user && item.user.department === req.user.department;
+        return normalizeDepartment(item.user.department) === adminDepartment;
       })
+      .filter((item) => item.user.role === 'employee')
+      .filter((item) => Boolean(item.checkIn))
       .map((item) => ({
         _id: item._id,
         dateKey: item.dateKey,
@@ -160,6 +156,7 @@ router.get('/', async (req, res) => {
               _id: item.user._id,
               name: item.user.name,
               phone: item.user.phone,
+              role: item.user.role,
               department: item.user.department,
             }
           : null,
@@ -177,7 +174,12 @@ router.get('/', async (req, res) => {
           : null,
       }));
 
-    return res.json({ count: rows.length, attendance: rows });
+    return res.json({
+      count: rows.length,
+      dateKey: requestedDateKey,
+      serverTodayKey: todayKey(),
+      attendance: rows,
+    });
   } catch (error) {
     return res.status(500).json({ message: 'Failed to fetch attendance records' });
   }
