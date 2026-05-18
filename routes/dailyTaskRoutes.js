@@ -1,6 +1,5 @@
 const express = require('express');
 const multer = require('multer');
-const { body, validationResult } = require('express-validator');
 const DailyTask = require('../models/DailyTask');
 const cloudinary = require('../config/cloudinary');
 const { protect } = require('../middleware/authMiddleware');
@@ -22,54 +21,61 @@ function normalizeDepartment(value) {
     .toLowerCase();
 }
 
-router.post(
-  '/start',
-  upload.any(),
-  [
-    body('taskTitle').notEmpty().withMessage('Task title is required'),
-  ],
-  async (req, res) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
+async function uploadToCloudinary(file, folder, resourceType = 'image') {
+  const base64 = `data:${file.mimetype};base64,${file.buffer.toString('base64')}`;
+  return cloudinary.uploader.upload(base64, {
+    folder,
+    resource_type: resourceType,
+  });
+}
+
+router.post('/start', upload.any(), async (req, res) => {
+  try {
+    const files = Array.isArray(req.files) ? req.files : [];
+    const imageFile =
+      files.find((item) => item.fieldname === 'startImage') || files.find((item) => item.fieldname === 'image') || null;
+    const voiceFile = files.find((item) => item.fieldname === 'startVoice') || null;
+
+    const taskTitle = String(req.body.taskTitle || '').trim();
+    if (!taskTitle && !voiceFile) {
+      return res.status(400).json({ message: 'Task title or voice note is required' });
+    }
+    if (!imageFile) {
+      return res.status(400).json({ message: 'Start image is mandatory' });
+    }
+    if (req.user.role !== 'employee') {
+      return res.status(403).json({ message: 'Only employee can start daily task' });
+    }
+    if (!req.user.department) {
+      return res.status(400).json({ message: 'Employee department is missing' });
     }
 
-    try {
-      const files = Array.isArray(req.files) ? req.files : [];
-      const imageFile = files.find((item) => item.fieldname === 'startImage') || files.find((item) => item.fieldname === 'image') || null;
-      if (!imageFile) {
-        return res.status(400).json({ message: 'Start image is mandatory' });
-      }
-      if (req.user.role !== 'employee') {
-        return res.status(403).json({ message: 'Only employee can start daily task' });
-      }
-      if (!req.user.department) {
-        return res.status(400).json({ message: 'Employee department is missing' });
-      }
+    const imageUpload = await uploadToCloudinary(imageFile, 'daily-tasks/start', 'image');
 
-      const base64Image = `data:${imageFile.mimetype};base64,${imageFile.buffer.toString('base64')}`;
-      const uploadResult = await cloudinary.uploader.upload(base64Image, {
-        folder: 'daily-tasks/start',
-      });
-
-      const now = new Date();
-      const dateKey = toDateKeyInput(now);
-      const task = await DailyTask.create({
-        taskTitle: String(req.body.taskTitle || '').trim(),
-        employee: req.user._id,
-        department: req.user.department,
-        dateKey,
-        status: 'started',
-        startTime: now,
-        startImageUrl: uploadResult.secure_url,
-      });
-
-      return res.status(201).json(task);
-    } catch (error) {
-      return res.status(500).json({ message: 'Failed to start daily task' });
+    let startVoiceUrl = null;
+    if (voiceFile) {
+      const voiceUpload = await uploadToCloudinary(voiceFile, 'daily-tasks/voice', 'video');
+      startVoiceUrl = voiceUpload.secure_url;
     }
+
+    const now = new Date();
+    const dateKey = toDateKeyInput(now);
+    const task = await DailyTask.create({
+      taskTitle: taskTitle || 'Voice note',
+      employee: req.user._id,
+      department: req.user.department,
+      dateKey,
+      status: 'started',
+      startTime: now,
+      startImageUrl: imageUpload.secure_url,
+      startVoiceUrl,
+    });
+
+    return res.status(201).json(task);
+  } catch (error) {
+    return res.status(500).json({ message: 'Failed to start daily task' });
   }
-);
+});
 
 /** No multer: JSON-only PATCH (single start image is enough). */
 router.patch('/:id/complete', (req, res) => completeDailyTaskById(req, res, req.params.id));

@@ -40,6 +40,11 @@ const dailyTaskSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    startVoiceUrl: {
+      type: String,
+      default: null,
+      trim: true,
+    },
     endImageUrl: {
       type: String,
       default: null,
