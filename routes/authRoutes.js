@@ -155,6 +155,42 @@ router.post(
   }
 );
 
+router.post(
+  '/forgot-password',
+  [
+    body('phone').notEmpty().withMessage('Phone is required'),
+    body('role').isIn(['admin', 'employee']).withMessage('Invalid role'),
+    body('newPassword').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      const firstError = errors.array()[0]?.msg || 'Validation failed';
+      return res.status(400).json({ message: firstError, errors: errors.array() });
+    }
+
+    try {
+      const phone = String(req.body.phone).trim();
+      const role = String(req.body.role).trim().toLowerCase();
+      const newPassword = String(req.body.newPassword);
+
+      const user = await User.findOne({ phone, role }).select('+password');
+      if (!user) {
+        return res.status(404).json({
+          message: 'No account found with this phone number and role.',
+        });
+      }
+
+      user.password = newPassword;
+      await user.save();
+
+      return res.json({ message: 'Password updated. You can sign in now.' });
+    } catch (error) {
+      return res.status(500).json({ message: 'Failed to reset password' });
+    }
+  }
+);
+
 router.get('/me', protect, async (req, res) => {
   res.json({ user: req.user });
 });
